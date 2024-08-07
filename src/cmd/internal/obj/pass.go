@@ -174,8 +174,16 @@ func linkpatch(ctxt *Link, sym *LSym, newprog ProgAlloc) {
 			continue
 		}
 		p.To.SetTarget(brloop(p.To.Target()))
-		if p.To.Target() != nil && p.To.Type == TYPE_BRANCH {
-			p.To.Offset = p.To.Target().Pc
+		if p.To.Target() != nil {
+			if p.As == AJMP && p.To.Target().As == ARET {
+				p.As = ARET
+				p.To = p.To.Target().To
+				continue
+			}
+
+			if p.To.Type == TYPE_BRANCH {
+				p.To.Offset = p.To.Target().Pc
+			}
 		}
 	}
 }
