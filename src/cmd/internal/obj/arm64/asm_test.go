@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"testing"
 )
 
@@ -254,5 +255,117 @@ func TestPCALIGN(t *testing.T) {
 		if !matched {
 			t.Errorf("The %s testing failed!\ninput: %s\noutput: %s\n", test.name, test.code, out)
 		}
+	}
+}
+
+// gen generates function with set size
+func gen(buf *bytes.Buffer, name string, size int) {
+	fmt.Fprintln(buf, "TEXT ", name, "(SB),0,$0-0")
+
+	for i := 0; i < (size << 4); i++ {
+		fmt.Fprintln(buf, "RET")
+	}
+}
+
+// TestFarCondBr19 makes sure that tramline insertion works when branch target further than +-1Mb
+func TestFarCondBr19(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skip in short mode")
+	}
+	testenv.MustHaveGoBuild(t)
+
+	dir, err := os.MkdirTemp("", "testcondbranch19")
+	if err != nil {
+		t.Fatalf("could not create directory: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	const branchDistance = 1 << (19 + 1)
+	const dummyFuncSize = branchDistance / 2
+
+	// generate few a very large function
+	buf := bytes.NewBuffer(make([]byte, 0, 2*branchDistance*4+1024))
+
+	for i := 0; i*dummyFuncSize < branchDistance; i++ {
+		gen(buf, "·topdummyfunction"+strconv.Itoa(i), dummyFuncSize)
+	}
+
+	fmt.Fprintln(buf, "TEXT ·fartarget(SB),0,$0-0")
+	fmt.Fprintln(buf, "MOVD $42, R0")
+	fmt.Fprintln(buf, "B ·bottomdummyfunction0(SB)")
+	fmt.Fprintln(buf, "B ·bottomdummyfunction1(SB)")
+	fmt.Fprintln(buf, "B ·topdummyfunction0(SB)")
+	fmt.Fprintln(buf, "B ·topdummyfunction1(SB)")
+	fmt.Fprintln(buf, "RET")
+
+	for i := 0; i*dummyFuncSize < branchDistance; i++ {
+		gen(buf, "·bottomdummyfunction"+strconv.Itoa(i), dummyFuncSize)
+	}
+
+	tmpfile1 := filepath.Join(dir, "fartarget_arm64.s")
+	err = os.WriteFile(tmpfile1, buf.Bytes(), 0644)
+	if err != nil {
+		t.Fatalf("can't write output: %v\n", err)
+	}
+
+	// generate function with CBZ
+	buf.Reset()
+
+	fmt.Fprintln(buf, "TEXT ·farcondbr19(SB),0,$0-8")
+	fmt.Fprintln(buf, "MOVD $0, R0")
+	fmt.Fprintln(buf, "CBZ R0, ·fartarget(SB)")
+	fmt.Fprintln(buf, "MOVD R0, ret+0(FP)")
+	fmt.Fprintln(buf, "RET")
+
+	tmpfile2 := filepath.Join(dir, "condbr19_arm64.s")
+	err = os.WriteFile(tmpfile2, buf.Bytes(), 0644)
+	if err != nil {
+		t.Fatalf("can't write output: %v\n", err)
+	}
+
+	// generate function with CBZ
+	buf.Reset()
+
+	fmt.Fprintln(buf, "package main")
+	fmt.Fprintln(buf, "import \"fmt\"")
+	fmt.Fprintln(buf, "func farcondbr19() uint64")
+	fmt.Fprintln(buf, "func main() { fmt.Print(farcondbr19()) }")
+
+	tmpfile3 := filepath.Join(dir, "main.go")
+	err = os.WriteFile(tmpfile3, buf.Bytes(), 0644)
+	if err != nil {
+		t.Fatalf("can't write output: %v\n", err)
+	}
+
+	// generate go.mod
+	buf.Reset()
+
+	fmt.Fprintln(buf, "module testcondbr19")
+	fmt.Fprintln(buf, "go 1.23") // TODO fix this
+
+	tmpfile4 := filepath.Join(dir, "go.mod")
+	err = os.WriteFile(tmpfile4, buf.Bytes(), 0644)
+	if err != nil {
+		t.Fatalf("can't write output: %v\n", err)
+	}
+
+	// build test
+	fmt.Println("Build")
+	cmd := testenv.Command(t, testenv.GoToolPath(t), "build", "-C", dir, "-o", "testcondbr19.out")
+	fmt.Println(cmd)
+	cmd.Env = append(os.Environ(), "GOOS=linux")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Errorf("build failed: %v, output: %s", err, out)
+	}
+
+	cmd = testenv.Command(t, filepath.Join(dir, "testcondbr19.out"))
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Errorf("runnig test failed: %v, output: %s", err, out)
+	}
+
+	if !(len(out) == 2 && out[0] == '4' && out[1] == '2') {
+		t.Errorf("test returned: %s wanted: %s", out, "42")
 	}
 }
